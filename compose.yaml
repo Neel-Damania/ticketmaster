@@ -1,1 +1,40 @@
-services: {}
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ticketmaster}
+      POSTGRES_USER: ${POSTGRES_USER:-ticketmaster}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ticketmaster}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  app:
+    build: .
+    environment:
+      PORT: 8080
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:-jdbc:postgresql://db:5432/ticketmaster}
+      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME:-ticketmaster}
+      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD:-ticketmaster}
+      JWT_SECRET: ${JWT_SECRET:-7f3c9a1e8b6d4f2a0c5e7b9d3f1a6c8e4b2d9f7a5c1e8b6d3a0f9c7e2b4d6a1}
+      JWT_EXPIRATION_MS: ${JWT_EXPIRATION_MS:-3600000}
+      HOLD_TTL_SECONDS: ${HOLD_TTL_SECONDS:-300}
+      HOLD_SWEEP_INTERVAL_MS: ${HOLD_SWEEP_INTERVAL_MS:-5000}
+    ports:
+      - "${PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health/ready >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  postgres-data:

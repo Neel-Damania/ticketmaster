@@ -1,0 +1,36 @@
+databases:
+  - name: ticketmaster-db
+    region: oregon
+    plan: free
+    databaseName: ticketmaster
+    user: ticketmaster
+    ipAllowList: []
+
+services:
+  - type: web
+    name: ticketmaster-api
+    runtime: docker
+    region: oregon
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health/ready
+    autoDeploy: true
+    envVars:
+      - key: SPRING_DATASOURCE_URL
+        sync: false
+      - key: SPRING_DATASOURCE_USERNAME
+        fromDatabase:
+          name: ticketmaster-db
+          property: user
+      - key: SPRING_DATASOURCE_PASSWORD
+        fromDatabase:
+          name: ticketmaster-db
+          property: password
+      - key: JWT_SECRET
+        value: 7f3c9a1e8b6d4f2a0c5e7b9d3f1a6c8e4b2d9f7a5c1e8b6d3a0f9c7e2b4d6a1
+      - key: JWT_EXPIRATION_MS
+        value: "3600000"
+      - key: HOLD_TTL_SECONDS
+        value: "300"
+      - key: HOLD_SWEEP_INTERVAL_MS
+        value: "5000"

@@ -1,6 +1,7 @@
 package com.assigment.paytm.ticketMaster.exception;
 
 import java.util.stream.Collectors;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -16,14 +17,16 @@ public class GlobalExceptionHandler {
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     @ExceptionHandler(DomainException.class)
-    public ResponseEntity<ApiError> handleDomainException(DomainException ex) {
+    public ResponseEntity<ApiError> handleDomainException(DomainException ex, HttpServletRequest request) {
+        request.setAttribute("reason", ex.getCode());
         log.warn("Domain exception: {} {}", ex.getCode(), ex.getMessage(), ex);
         return ResponseEntity.status(ex.getHttpStatus())
             .body(new ApiError(ex.getCode(), ex.getMessage()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException ex) {
+    public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest request) {
+        request.setAttribute("reason", "bad_request");
         String message = ex.getBindingResult().getFieldErrors().stream()
             .map(FieldError::getDefaultMessage)
             .collect(Collectors.joining(", "));
@@ -31,12 +34,14 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
-    public ResponseEntity<ApiError> handleUnreadable(HttpMessageNotReadableException ex) {
+    public ResponseEntity<ApiError> handleUnreadable(HttpMessageNotReadableException ex, HttpServletRequest request) {
+        request.setAttribute("reason", "bad_request");
         return ResponseEntity.badRequest().body(new ApiError("bad_request", "Malformed JSON body"));
     }
 
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<ApiError> handleUnexpected(Exception ex) {
+    public ResponseEntity<ApiError> handleUnexpected(Exception ex, HttpServletRequest request) {
+        request.setAttribute("reason", "internal_error");
         log.error("Unhandled exception", ex);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
             .body(new ApiError("internal_error", "Unexpected server error"));

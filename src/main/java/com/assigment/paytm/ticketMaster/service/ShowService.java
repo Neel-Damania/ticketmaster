@@ -25,10 +25,12 @@ public class ShowService {
     private static final Pattern SEAT_LABEL_PATTERN = Pattern.compile("^[A-Za-z0-9_-]{1,16}$");
     private final ShowRepository showRepository;
     private final SeatRepository seatRepository;
+    private final ReservationMetrics reservationMetrics;
 
-    public ShowService(ShowRepository showRepository, SeatRepository seatRepository) {
+    public ShowService(ShowRepository showRepository, SeatRepository seatRepository, ReservationMetrics reservationMetrics) {
         this.showRepository = showRepository;
         this.seatRepository = seatRepository;
+        this.reservationMetrics = reservationMetrics;
     }
 
     @Transactional
@@ -58,6 +60,7 @@ public class ShowService {
         UUID showId = UUID.randomUUID();
         showRepository.save(new ShowEntity(showId, request.name(), pricePaise, perUserLimit, labels.size()));
         seatRepository.saveAll(labels.stream().map(label -> new SeatEntity(showId, label)).toList());
+        reservationMetrics.registerShowGaugeAfterCommit(showId);
         return new ShowResponse(showId, request.name(), pricePaise, perUserLimit, labels.size());
     }
 

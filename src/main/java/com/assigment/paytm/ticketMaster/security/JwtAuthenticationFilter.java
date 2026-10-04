@@ -22,7 +22,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
         throws ServletException, IOException {
         String path = request.getRequestURI();
-        if (path.equals("/auth/token") || path.startsWith("/actuator")) {
+        if (path.equals("/auth/token") || path.startsWith("/actuator") || path.startsWith("/health/")) {
             filterChain.doFilter(request, response);
             return;
         }

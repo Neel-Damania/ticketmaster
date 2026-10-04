@@ -37,6 +37,7 @@ public class ReservationService {
     private final IdempotencyRepository idempotencyRepository;
     private final TransactionTemplate transactionTemplate;
     private final HoldProperties holdProperties;
+    private final ReservationMetrics reservationMetrics;
 
     public ReservationService(
         ShowRepository showRepository,
@@ -45,7 +46,8 @@ public class ReservationService {
         QuotaRepository quotaRepository,
         IdempotencyRepository idempotencyRepository,
         TransactionTemplate transactionTemplate,
-        HoldProperties holdProperties
+        HoldProperties holdProperties,
+        ReservationMetrics reservationMetrics
     ) {
         this.showRepository = showRepository;
         this.seatRepository = seatRepository;
@@ -54,6 +56,7 @@ public class ReservationService {
         this.idempotencyRepository = idempotencyRepository;
         this.transactionTemplate = transactionTemplate;
         this.holdProperties = holdProperties;
+        this.reservationMetrics = reservationMetrics;
     }
 
     public ReservationResult reserveWithStatus(UUID showId, String userId, List<String> requestedSeats, String idempotencyHeader, String idempotencyBody) {
@@ -63,7 +66,7 @@ public class ReservationService {
 
         for (int attempt = 0; attempt < 3; attempt++) {
             try {
-                return transactionTemplate.execute(status -> {
+                ReservationResult result = transactionTemplate.execute(status -> {
                     var show = showRepository.findById(showId)
                         .orElseThrow(() -> new DomainException("not_found", HttpStatus.NOT_FOUND.value(), "Show not found"));
 
@@ -146,10 +149,17 @@ public class ReservationService {
                         expiresAt
                     ), false);
                 });
+                if (result.replay()) {
+                    reservationMetrics.recordDecline("idempotent_replay");
+                }
+                return result;
             } catch (PessimisticLockingFailureException ex) {
                 if (attempt == 2) {
                     throw ex;
                 }
+            } catch (DomainException ex) {
+                reservationMetrics.recordDecline(ex.getCode());
+                throw ex;
             }
         }
         throw new IllegalStateException("Reservation transaction failed after retries");
@@ -184,6 +194,7 @@ public class ReservationService {
                         throw new DomainException("hold_expired", HttpStatus.CONFLICT.value(), "Hold is expired");
                     }
                     reservationRepository.updateStatus(reservationId, "confirmed");
+                    reservationMetrics.recordConfirmedAfterCommit();
                     return reservationRepository.findById(reservationId)
                         .map(this::toResponse)
                         .orElseThrow(() -> new DomainException("not_found", HttpStatus.NOT_FOUND.value(), "Reservation not found"));

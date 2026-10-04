@@ -50,6 +50,14 @@ public interface SeatRepository extends JpaRepository<SeatEntity, SeatId> {
         """)
     int countLiveSeats(@Param("showId") UUID showId, @Param("userId") String userId);
 
+    @Query(value = """
+        SELECT COUNT(*)
+        FROM seats
+        WHERE show_id = :showId
+          AND (status = 'available' OR (status = 'held' AND hold_expires_at <= now()))
+        """, nativeQuery = true)
+    int countAvailable(@Param("showId") UUID showId);
+
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query(value = """
         UPDATE seats
