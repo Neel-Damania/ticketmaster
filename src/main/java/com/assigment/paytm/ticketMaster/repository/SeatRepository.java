@@ -96,6 +96,18 @@ public interface SeatRepository extends JpaRepository<SeatEntity, SeatId> {
         """, nativeQuery = true)
     int markExpiredHolds(@Param("reservationId") UUID reservationId);
 
+    @Query(value = """
+        SELECT EXISTS (
+          SELECT 1 FROM seats
+          WHERE show_id = :showId
+            AND label IN (:labels)
+            AND (status = 'confirmed' OR (status = 'held' AND hold_expires_at > now()))
+            AND user_id IS DISTINCT FROM :userId)
+        """, nativeQuery = true)
+        boolean anyTakenByOthers(@Param("showId") UUID showId,
+                         @Param("labels") List<String> labels,
+                         @Param("userId") String userId);
+
     interface LockedSeat {
         String getLabel();
         String getStatus();

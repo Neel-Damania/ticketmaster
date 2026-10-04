@@ -19,8 +19,15 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
+import java.util.stream.IntStream;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -29,6 +36,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Service
 public class ReservationService {
     private static final Pattern SEAT_LABEL_PATTERN = Pattern.compile("^[A-Za-z0-9_-]{1,16}$");
+    private static final int GATE_COUNT = 1024;
+    private static final int MAX_CACHED_SHOWS = 10_000;
 
     private final ShowRepository showRepository;
     private final SeatRepository seatRepository;
@@ -39,6 +48,19 @@ public class ReservationService {
     private final HoldProperties holdProperties;
     private final ReservationMetrics reservationMetrics;
 
+    // Optimisation only: losers of a seat race wait here (cheap, no DB connection held)
+    // instead of queueing on a database row lock. The database still decides every success.
+    private final ReentrantLock[] gates = IntStream.range(0, GATE_COUNT)
+        .mapToObj(i -> new ReentrantLock())
+        .toArray(ReentrantLock[]::new);
+
+    // Caps how many reserve requests touch the database at once, so the Hikari pool is never
+    // oversubscribed (no pool-timeout 500s) and other endpoints still get connections.
+    private final Semaphore dbWork;
+
+    // Shows are never edited after creation, so the two fields reserve needs are safe to cache.
+    private final ConcurrentHashMap<UUID, ShowInfo> showCache = new ConcurrentHashMap<>();
+
     public ReservationService(
         ShowRepository showRepository,
         SeatRepository seatRepository,
@@ -47,7 +69,8 @@ public class ReservationService {
         IdempotencyRepository idempotencyRepository,
         TransactionTemplate transactionTemplate,
         HoldProperties holdProperties,
-        ReservationMetrics reservationMetrics
+        ReservationMetrics reservationMetrics,
+        @Value("${reservation.db-concurrency:16}") int dbConcurrency
     ) {
         this.showRepository = showRepository;
         this.seatRepository = seatRepository;
@@ -57,6 +80,7 @@ public class ReservationService {
         this.transactionTemplate = transactionTemplate;
         this.holdProperties = holdProperties;
         this.reservationMetrics = reservationMetrics;
+        this.dbWork = new Semaphore(dbConcurrency);
     }
 
     public ReservationResult reserveWithStatus(UUID showId, String userId, List<String> requestedSeats, String idempotencyHeader, String idempotencyBody) {
@@ -64,16 +88,46 @@ public class ReservationService {
         String idempotencyKey = firstNonBlank(idempotencyHeader, idempotencyBody);
         String requestHash = sha256(showId + ":" + String.join(",", seats));
 
+        ShowInfo show = loadShow(showId);
+        if (seats.size() > show.perUserLimit()) {
+            reservationMetrics.recordDecline("per_user_limit");
+            throw new DomainException("per_user_limit", HttpStatus.CONFLICT.value(), "Requested more seats than the per-user limit allows");
+        }
+
+        // Gates are taken in sorted order, so two multi-seat requests cannot wait on each other in a cycle.
+        List<ReentrantLock> held = gatesFor(showId, seats);
+        held.forEach(ReentrantLock::lock);
+        try {
+            dbWork.acquireUninterruptibly();
+            try {
+                rejectIfTaken(showId, userId, seats, idempotencyKey);
+                return runReservation(showId, show, userId, seats, idempotencyKey, requestHash);
+            } finally {
+                dbWork.release();
+            }
+        } finally {
+            for (int i = held.size() - 1; i >= 0; i--) {
+                held.get(i).unlock();
+            }
+        }
+    }
+
+    // Cheap pre-check outside any transaction. It can only reject: a "taken" answer was true at the
+    // moment of the read, and a "free" answer just falls through to the transaction, which decides.
+    // Requests whose idempotency key already exists skip it so replays still return the original reservation.
+    private void rejectIfTaken(UUID showId, String userId, List<String> seats, String idempotencyKey) {
+        boolean knownKey = idempotencyKey != null && !idempotencyKey.isBlank()
+            && idempotencyRepository.existsById(new IdempotencyId(userId, idempotencyKey));
+        if (!knownKey && seatRepository.anyTakenByOthers(showId, seats, userId)) {
+            reservationMetrics.recordDecline("seat_taken");
+            throw new DomainException("seat_taken", HttpStatus.CONFLICT.value(), "One or more seats are already taken");
+        }
+    }
+
+    private ReservationResult runReservation(UUID showId, ShowInfo show, String userId, List<String> seats, String idempotencyKey, String requestHash) {
         for (int attempt = 0; attempt < 3; attempt++) {
             try {
                 ReservationResult result = transactionTemplate.execute(status -> {
-                    var show = showRepository.findById(showId)
-                        .orElseThrow(() -> new DomainException("not_found", HttpStatus.NOT_FOUND.value(), "Show not found"));
-
-                    if (seats.size() > show.getPerUserLimit()) {
-                        throw new DomainException("per_user_limit", HttpStatus.CONFLICT.value(), "Requested more seats than the per-user limit allows");
-                    }
-
                     // Handle idempotency key if provided for Reservation
                     if (idempotencyKey != null && !idempotencyKey.isBlank()) {
                         int inserted = idempotencyRepository.insertIfAbsent(userId, idempotencyKey, requestHash);
@@ -89,11 +143,12 @@ public class ReservationService {
                         }
                     }
 
+                    // Lock order: idempotency row -> quota row -> seat rows (sorted by label)
                     quotaRepository.insertQuotaIfAbsent(showId, userId);
                     quotaRepository.lockQuota(new QuotaId(showId, userId))
                         .orElseThrow(() -> new IllegalStateException("Quota row was not created"));
                     int liveCount = seatRepository.countLiveSeats(showId, userId);
-                    if (liveCount + seats.size() > show.getPerUserLimit()) {
+                    if (liveCount + seats.size() > show.perUserLimit()) {
                         throw new DomainException("per_user_limit", HttpStatus.CONFLICT.value(), "Per-user limit reached");
                     }
 
@@ -121,7 +176,7 @@ public class ReservationService {
 
                     long amountPaise;
                     try {
-                        amountPaise = Math.multiplyExact(show.getPricePaise(), seats.size());
+                        amountPaise = Math.multiplyExact(show.pricePaise(), seats.size());
                     } catch (ArithmeticException ex) {
                         throw new DomainException("bad_request", HttpStatus.BAD_REQUEST.value(), "Reservation amount is too large");
                     }
@@ -157,6 +212,7 @@ public class ReservationService {
                 if (attempt == 2) {
                     throw ex;
                 }
+                backoff(attempt);
             } catch (DomainException ex) {
                 reservationMetrics.recordDecline(ex.getCode());
                 throw ex;
@@ -203,6 +259,7 @@ public class ReservationService {
                 if (attempt == 2) {
                     throw ex;
                 }
+                backoff(attempt);
             }
         }
         throw new IllegalStateException("Confirm transaction failed after retries");
@@ -231,9 +288,45 @@ public class ReservationService {
                 if (attempt == 2) {
                     throw ex;
                 }
+                backoff(attempt);
             }
         }
         throw new IllegalStateException("Cancel transaction failed after retries");
+    }
+
+    private ShowInfo loadShow(UUID showId) {
+        ShowInfo cached = showCache.get(showId);
+        if (cached != null) {
+            return cached;
+        }
+        var show = showRepository.findById(showId).orElseThrow(() -> {
+            reservationMetrics.recordDecline("not_found");
+            return new DomainException("not_found", HttpStatus.NOT_FOUND.value(), "Show not found");
+        });
+        ShowInfo info = new ShowInfo(show.getPerUserLimit(), show.getPricePaise());
+        if (showCache.size() >= MAX_CACHED_SHOWS) {
+            showCache.clear();
+        }
+        showCache.put(showId, info);
+        return info;
+    }
+
+    private List<ReentrantLock> gatesFor(UUID showId, List<String> seats) {
+        return seats.stream()
+            .map(seat -> Math.floorMod(Objects.hash(showId, seat), GATE_COUNT))
+            .distinct()
+            .sorted()
+            .map(index -> gates[index])
+            .toList();
+    }
+
+    // Short randomised pause so two transactions that just deadlocked do not collide again immediately.
+    private void backoff(int attempt) {
+        try {
+            Thread.sleep(5L * (attempt + 1) + ThreadLocalRandom.current().nextInt(10));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private boolean isSeatFree(SeatRepository.LockedSeat seatRow) {
@@ -286,6 +379,9 @@ public class ReservationService {
     }
 
     public record ReservationResult(ReservationResponse response, boolean replay) {
+    }
+
+    private record ShowInfo(int perUserLimit, long pricePaise) {
     }
 
     private ReservationResponse toResponse(ReservationEntity reservation) {
