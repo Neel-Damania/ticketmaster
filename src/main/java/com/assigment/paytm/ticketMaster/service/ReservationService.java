@@ -299,16 +299,25 @@ public class ReservationService {
         if (cached != null) {
             return cached;
         }
-        var show = showRepository.findById(showId).orElseThrow(() -> {
-            reservationMetrics.recordDecline("not_found");
-            return new DomainException("not_found", HttpStatus.NOT_FOUND.value(), "Show not found");
-        });
-        ShowInfo info = new ShowInfo(show.getPerUserLimit(), show.getPricePaise());
-        if (showCache.size() >= MAX_CACHED_SHOWS) {
-            showCache.clear();
+
+        // A new show can receive a burst before it is cached. Let one caller read it from Postgres.
+        synchronized (showCache) {
+            cached = showCache.get(showId);
+            if (cached != null) {
+                return cached;
+            }
+
+            var show = showRepository.findById(showId).orElseThrow(() -> {
+                reservationMetrics.recordDecline("not_found");
+                return new DomainException("not_found", HttpStatus.NOT_FOUND.value(), "Show not found");
+            });
+            ShowInfo info = new ShowInfo(show.getPerUserLimit(), show.getPricePaise());
+            if (showCache.size() >= MAX_CACHED_SHOWS) {
+                showCache.clear();
+            }
+            showCache.put(showId, info);
+            return info;
         }
-        showCache.put(showId, info);
-        return info;
     }
 
     private List<ReentrantLock> gatesFor(UUID showId, List<String> seats) {
