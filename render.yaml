@@ -16,10 +16,18 @@ services:
     healthCheckPath: /health/ready
     autoDeploy: true
     envVars:
-      - key: DATABASE_URL
+      - key: DB_HOST
         fromDatabase:
           name: ticketmaster-db
-          property: connectionString
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: ticketmaster-db
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: ticketmaster-db
+          property: database
       - key: SPRING_DATASOURCE_USERNAME
         fromDatabase:
           name: ticketmaster-db
