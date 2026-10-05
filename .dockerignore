@@ -1,0 +1,26 @@
+# Maven build output (the Dockerfile builds inside its own stage)
+target/
+**/target/
+
+# Repository metadata and local editor files
+.git/
+.gitignore
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+
+# Local output and project material not needed to build the image
+logs/
+docs/
+scripts/
+README.md
+HELP.md
+compose.yaml
+render.yaml
+
+# Local environment and temporary files
+.env
+.env.*
+*.log
+*.tmp

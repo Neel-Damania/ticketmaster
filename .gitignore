@@ -3,6 +3,12 @@ target/
 logs/
 docs/
 scripts/
+!docs/
+docs/*
+!docs/AI_LOG.md
+!scripts/
+scripts/*
+!scripts/correctness-burst.sh
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
